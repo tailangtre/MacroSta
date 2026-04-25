@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # source if the last successful fetch is more recent than this.
     # Tuned to fit free-tier quotas with headroom.
     SOURCE_INTERVALS_MINUTES: dict = {
-        "newsapi":      60,    # 100/day → 24 calls × 1 query = budget for several queries/cycle
+        "newsapi":      240,   # 100/day, 15 queries per cycle, fits at 6 cycles/day
         "finnhub":      30,    # 60/min, can be aggressive
         "alphavantage": 180,   # 25/day, very tight — 8 calls/day
         "marketaux":    60,    # 100/day
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     ]
 
     # Maximum articles to process per fetch cycle (cost control)
-    MAX_ARTICLES_PER_CYCLE: int = 30
+    MAX_ARTICLES_PER_CYCLE: int = 100
 
     # Minimum relevance score (0–1) to keep an article
     MIN_RELEVANCE_SCORE: float = 0.15
