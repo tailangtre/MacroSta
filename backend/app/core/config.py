@@ -10,9 +10,42 @@ import os
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # ── News API ────────────────────────────────────────────────────
-    NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")  # https://newsapi.org/  (free tier: 100 req/day)
-    NEWS_FETCH_INTERVAL_MINUTES: int = 60 # how often to poll
+    # ── News API keys ───────────────────────────────────────────────
+    # All optional — sources with missing keys are silently skipped.
+    NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")          # newsapi.org      100/day
+    FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")    # finnhub.io        60/min
+    ALPHAVANTAGE_API_KEY: str = os.getenv("ALPHAVANTAGE_API_KEY", "")  # alphavantage.co  25/day
+    MARKETAUX_API_KEY: str = os.getenv("MARKETAUX_API_KEY", "")        # marketaux.com   100/day
+    POLYGON_API_KEY: str = os.getenv("POLYGON_API_KEY", "")            # polygon.io       5/min
+    FMP_API_KEY: str = os.getenv("FMP_API_KEY", "")                    # financialmodelingprep.com 250/day
+    NEWSDATA_API_KEY: str = os.getenv("NEWSDATA_API_KEY", "")          # newsdata.io    200/day
+    GNEWS_API_KEY: str = os.getenv("GNEWS_API_KEY", "")                # gnews.io       100/day
+    CURRENTS_API_KEY: str = os.getenv("CURRENTS_API_KEY", "")          # currentsapi.services 600/day
+
+    # ── Pipeline cadence ────────────────────────────────────────────
+    # Top-level scheduler interval. Per-source cadence is enforced separately
+    # in the orchestrator (see SOURCE_INTERVALS_MINUTES) so we don't burn
+    # a daily-quota source 24 times a day.
+    NEWS_FETCH_INTERVAL_MINUTES: int = 30
+
+    # Minimum minutes between calls per source. The orchestrator skips a
+    # source if the last successful fetch is more recent than this.
+    # Tuned to fit free-tier quotas with headroom.
+    SOURCE_INTERVALS_MINUTES: dict = {
+        "newsapi":      60,    # 100/day → 24 calls × 1 query = budget for several queries/cycle
+        "finnhub":      30,    # 60/min, can be aggressive
+        "alphavantage": 180,   # 25/day, very tight — 8 calls/day
+        "marketaux":    60,    # 100/day
+        "polygon":      60,    # 5/min, but daily limit on free
+        "fmp":          60,    # 250/day
+        "newsdata":     60,    # 200/day
+        "gnews":        60,    # 100/day
+        "currents":     30,    # 600/day, generous
+        "rss":          15,    # unlimited but be polite
+    }
+
+    # HTTP timeout per source request (seconds).
+    SOURCE_HTTP_TIMEOUT: int = 20
 
     # ── Groq ────────────────────────────────────────────────────────
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")  # https://groq.com/ (free tier: 100 req/month)

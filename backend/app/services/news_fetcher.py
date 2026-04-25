@@ -1,94 +1,89 @@
 """
-MacroScope — NewsAPI fetcher.
-Fetches articles from NewsAPI for each configured query and deduplicates by URL.
+MacroScope — Multi-source news orchestrator.
+
+Calls every enabled source adapter in parallel, deduplicates the merged
+result by URL and content hash, and returns a list of parsed articles ready
+for the relevance filter.
+
+Per-source cadence is enforced here (not in the scheduler) so that a single
+30-minute pipeline tick can poll Tiingo (every cycle) while skipping
+Mediastack (only twice a day, has a 100/month free quota).
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any
-
-import httpx
+from typing import Any, Dict, List
 
 from app.core.config import settings
+from app.services.sources import ALL as ALL_SOURCES
+from app.utils.hashing import content_hash
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
 
-NEWSAPI_BASE = "https://newsapi.org/v2/everything"
+# In-memory record of when each source was last polled successfully.
+# Resets on process restart, which is fine — worst case we hit one source
+# slightly more often than we'd like once after a deploy.
+_last_fetch: Dict[str, datetime] = {}
+
+
+def _ready(name: str) -> bool:
+    interval_min = settings.SOURCE_INTERVALS_MINUTES.get(name, 60)
+    last = _last_fetch.get(name)
+    if last is None:
+        return True
+    return datetime.now(timezone.utc) - last >= timedelta(minutes=interval_min)
+
+
+async def _run_source(mod) -> List[Dict[str, Any]]:
+    name = mod.NAME
+    if not mod.enabled():
+        logger.debug("source %s skipped: not configured", name)
+        return []
+    if not _ready(name):
+        logger.debug("source %s skipped: within rate window", name)
+        return []
+    try:
+        articles = await mod.fetch()
+        _last_fetch[name] = datetime.now(timezone.utc)
+        logger.info("source %s: %d articles", name, len(articles))
+        return articles
+    except Exception:
+        logger.exception("source %s: unhandled error", name)
+        return []
 
 
 async def fetch_articles() -> List[Dict[str, Any]]:
-    """
-    Run all configured queries against NewsAPI and return a deduplicated list
-    of raw article dicts.
-    """
-    if not settings.NEWS_API_KEY:
-        logger.warning("NEWS_API_KEY not set — skipping NewsAPI fetch.")
-        return []
+    """Fetch from every enabled, ready source in parallel; dedup the merged list."""
+    chunks = await asyncio.gather(*[_run_source(s) for s in ALL_SOURCES])
 
-    seen_urls: set = set()
-    all_articles: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    seen_hashes: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        for art in chunk:
+            url = art.get("url", "")
+            if not url or url in seen_urls:
+                continue
+            h = content_hash(art.get("raw_title", ""), art.get("raw_description", ""))
+            if h in seen_hashes:
+                # Same story under a different URL (syndication, aggregator rewrite).
+                continue
+            art["content_hash"] = h
+            seen_urls.add(url)
+            seen_hashes.add(h)
+            out.append(art)
 
-    # NewsAPI free tier only accepts YYYY-MM-DD (date-only) for the `from` param.
-    # Full ISO datetime with time is a paid-tier feature — using it on free
-    # accounts returns 0 results silently. Use 7 days to guarantee coverage.
-    from_date = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        for query in settings.NEWS_QUERIES:
-            try:
-                resp = await client.get(
-                    NEWSAPI_BASE,
-                    params={
-                        "q": query,
-                        "from": from_date,
-                        "language": "en",
-                        "sortBy": "publishedAt",
-                        "pageSize": 20,
-                        "apiKey": settings.NEWS_API_KEY,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                articles = data.get("articles", [])
-                for art in articles:
-                    url = art.get("url", "")
-                    if not url or url in seen_urls:
-                        continue
-                    # Skip removed articles
-                    if art.get("title") in (None, "[Removed]"):
-                        continue
-                    seen_urls.add(url)
-                    all_articles.append(art)
-
-                logger.info(
-                    "Query '%s': %d new articles (total so far: %d)",
-                    query[:40],
-                    len(articles),
-                    len(all_articles),
-                )
-
-            except httpx.HTTPStatusError as exc:
-                logger.error("NewsAPI HTTP error for query '%s': %s", query, exc)
-            except Exception as exc:
-                logger.exception("Unexpected error fetching query '%s': %s", query, exc)
-
-    logger.info("Total raw articles fetched: %d", len(all_articles))
-    return all_articles
+    logger.info("orchestrator: %d unique articles after cross-source dedup", len(out))
+    return out
 
 
 def parse_article(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalise a raw NewsAPI article dict into a clean internal dict."""
-    published_str = raw.get("publishedAt", "")
-    try:
-        published_at = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
-    except Exception:
-        published_at = datetime.now(timezone.utc)
+    """Pass-through: adapters already return the canonical schema.
 
-    return {
-        "url": raw.get("url", ""),
-        "source_name": (raw.get("source") or {}).get("name", ""),
-        "raw_title": raw.get("title", "") or "",
-        "raw_description": (raw.get("description") or raw.get("content") or "")[:2000],
-        "published_at": published_at,
-    }
+    Kept as a function so the rest of the pipeline doesn't need to know that
+    parsing now happens inside each adapter. If we ever need a post-hoc
+    normalization step (e.g. strip HTML), it goes here.
+    """
+    raw.setdefault("content_hash",
+                   content_hash(raw.get("raw_title", ""), raw.get("raw_description", "")))
+    return raw

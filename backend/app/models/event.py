@@ -1,12 +1,16 @@
 """
 MacroScope — Event ORM model.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import String, Float, DateTime, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Event(Base):
@@ -17,10 +21,14 @@ class Event(Base):
     # ── Source metadata ─────────────────────────────────────────────
     source_url: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
     source_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    # Which API/feed delivered this article: "newsapi", "finnhub", "rss:yahoo", etc.
+    # Distinct from source_name (the outlet, e.g. "Reuters") and useful for
+    # debugging coverage gaps and weighting source quality later.
+    provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     raw_title: Mapped[str] = mapped_column(Text)
     raw_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime] = mapped_column(DateTime, index=True)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     # ── LLM-enriched fields ─────────────────────────────────────────
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -72,5 +80,6 @@ class Event(Base):
             "risk_level": self.risk_level or "MEDIUM",
             "source_url": self.source_url,
             "source_name": self.source_name or "",
+            "provider": self.provider or "",
             "ai_analysis": self.ai_analysis or None,
         }

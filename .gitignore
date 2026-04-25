@@ -1,3 +1,11 @@
 backend/.env
 frontend/.env
 .env*
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local SQLite databases
+*.db

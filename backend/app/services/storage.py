@@ -42,6 +42,7 @@ async def save_event(article: Dict[str, Any]) -> bool:
         event = Event(
             source_url=url,
             source_name=article.get("source_name"),
+            provider=article.get("provider"),
             raw_title=article.get("raw_title", ""),
             raw_description=article.get("raw_description"),
             published_at=published_at,

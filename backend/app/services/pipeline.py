@@ -25,7 +25,6 @@ from app.services.llm_enricher import enrich_article
 from app.services.storage import save_event
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
 # Max concurrent LLM calls (stay well within rate limits)
 _LLM_SEMAPHORE = asyncio.Semaphore(3)
 
@@ -35,11 +34,18 @@ async def _enrich_with_limit(article: Dict[str, Any]) -> Dict[str, Any] | None:
         return await enrich_article(article)
 
 
-async def _get_existing_urls() -> set:
-    """Pull all stored source URLs to avoid re-processing."""
+async def _get_existing_urls_and_hashes() -> tuple[set, set]:
+    """Pull stored URLs *and* content hashes so we can dedup against either."""
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Event.source_url))
-        return {row[0] for row in result.all()}
+        result = await session.execute(select(Event.source_url, Event.content_hash))
+        urls: set = set()
+        hashes: set = set()
+        for url, h in result.all():
+            if url:
+                urls.add(url)
+            if h:
+                hashes.add(h)
+        return urls, hashes
 
 
 async def run_news_pipeline() -> Dict[str, int]:
@@ -63,9 +69,13 @@ async def run_news_pipeline() -> Dict[str, int]:
     stats["relevant"] = len(relevant)
     logger.info("%d / %d articles passed relevance filter", len(relevant), len(parsed))
 
-    # ── Step 4: Dedup against DB ────────────────────────────────────
-    existing_urls = await _get_existing_urls()
-    new_articles = [a for a in relevant if a["url"] not in existing_urls]
+    # ── Step 4: Dedup against DB (URL + content hash) ───────────────
+    existing_urls, existing_hashes = await _get_existing_urls_and_hashes()
+    new_articles = [
+        a for a in relevant
+        if a["url"] not in existing_urls
+        and a.get("content_hash") not in existing_hashes
+    ]
     stats["new"] = len(new_articles)
     logger.info("%d articles are new (not yet in DB)", len(new_articles))
 
